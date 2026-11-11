@@ -1,0 +1,178 @@
+---
+- name: Déployer la plateforme Logistique FID (Django + MySQL + Nginx)
+  hosts: serveur
+  become: true
+
+  tasks:
+    # ---------- Système ----------
+    - name: Installer les paquets système
+      ansible.builtin.apt:
+        name: [python3-venv, python3-pip, python3-pymysql, git, nginx, mysql-server, acl]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: MySQL démarré et activé au démarrage
+      ansible.builtin.service:
+        name: mysql
+        state: started
+        enabled: true
+
+    # ---------- Base de données MySQL ----------
+    - name: Créer la base de données
+      community.mysql.mysql_db:
+        name: "{{ db_nom }}"
+        encoding: utf8mb4
+        collation: utf8mb4_unicode_ci
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Créer l'utilisateur MySQL de l'application
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        host: "{{ item }}"
+        password: "{{ vault_db_password }}"
+        priv: "{{ db_nom }}.*:ALL"
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+      loop: [localhost, 127.0.0.1]
+      no_log: true
+
+    # ---------- Application ----------
+    - name: Créer l'utilisateur système de l'application
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+        create_home: false
+
+    - name: Créer le dossier de l'application
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Récupérer le code depuis Git
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ repo_version }}"
+      become_user: "{{ app_user }}"
+      notify: Redémarrer gunicorn
+
+    - name: Déposer le fichier de configuration (.env)
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+      notify: Redémarrer gunicorn
+
+    - name: Créer l'environnement virtuel et installer les dépendances
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+        virtualenv_command: python3 -m venv
+      become_user: "{{ app_user }}"
+      notify: Redémarrer gunicorn
+
+    - name: Appliquer les migrations de la base
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py migrate --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      register: migration
+      changed_when: "'Applying' in migration.stdout"
+
+    - name: Collecter les fichiers statiques (CSS)
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py collectstatic --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      register: statiques
+      changed_when: "not (statiques.stdout | trim).startswith('0 static files')"
+
+    - name: Créer le compte administrateur (une seule fois)
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py createsuperuser --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      environment:
+        DJANGO_SUPERUSER_USERNAME: "{{ vault_admin_user }}"
+        DJANGO_SUPERUSER_EMAIL: "{{ vault_admin_email }}"
+        DJANGO_SUPERUSER_PASSWORD: "{{ vault_admin_password }}"
+      become_user: "{{ app_user }}"
+      register: superuser
+      changed_when: superuser.rc == 0
+      failed_when: superuser.rc != 0 and 'already taken' not in superuser.stderr
+      no_log: true
+
+    # ---------- Services ----------
+    - name: Installer le service Gunicorn
+      ansible.builtin.template:
+        src: gunicorn-fid.service.j2
+        dest: /etc/systemd/system/gunicorn-fid.service
+        mode: "0644"
+      notify: Redémarrer gunicorn
+
+    - name: Démarrer Gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn-fid
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Configurer Nginx
+      ansible.builtin.template:
+        src: nginx-fid.conf.j2
+        dest: /etc/nginx/sites-available/fid
+        mode: "0644"
+      notify: Recharger nginx
+
+    - name: Activer le site Nginx
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/fid
+        dest: /etc/nginx/sites-enabled/fid
+        state: link
+      notify: Recharger nginx
+
+    - name: Désactiver le site Nginx par défaut
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Recharger nginx
+
+    # ---------- Sauvegardes ----------
+    - name: Créer le dossier de sauvegarde
+      ansible.builtin.file:
+        path: /var/backups/fid
+        state: directory
+        mode: "0750"
+
+    - name: Sauvegarde quotidienne de la base à 2 h
+      ansible.builtin.cron:
+        name: "Sauvegarde MySQL FID"
+        minute: "0"
+        hour: "2"
+        job: "mysqldump --single-transaction {{ db_nom }} | gzip > /var/backups/fid/{{ db_nom }}_$(date +\\%F).sql.gz"
+
+    - name: Supprimer les sauvegardes de plus de 14 jours
+      ansible.builtin.cron:
+        name: "Nettoyage des sauvegardes FID"
+        minute: "30"
+        hour: "2"
+        job: "find /var/backups/fid -name '*.sql.gz' -mtime +14 -delete"
+
+  handlers:
+    - name: Redémarrer gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn-fid
+        state: restarted
+
+    - name: Recharger nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

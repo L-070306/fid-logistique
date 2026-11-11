@@ -1,0 +1,9 @@
+app_user: fid
+app_dir: /opt/fid_logistique
+repo_url: https://github.com/VOTRE-COMPTE/fid-logistique.git
+repo_version: main
+domaine: 192.168.1.50          # nom de domaine ou adresse IP du serveur
+db_nom: fid_logistique
+db_user: fid_app
+db_host: 127.0.0.1
+db_port: 3306

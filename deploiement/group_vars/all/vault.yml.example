@@ -1,0 +1,6 @@
+# Copier en "vault.yml", remplacer les valeurs, puis chiffrer :  ansible-vault encrypt group_vars/all/vault.yml
+vault_db_password: "changez-moi"
+vault_django_secret_key: "changez-moi-par-une-longue-chaine-aleatoire-de-50-caracteres-ou-plus"
+vault_admin_user: admin
+vault_admin_email: admin@exemple.mg
+vault_admin_password: "changez-moi"

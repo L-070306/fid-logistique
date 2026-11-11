@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block titre %}Tableau de bord{% endblock %}
+{% block contenu %}
+<h1>Tableau de bord</h1>
+<div class="indicateurs">
+  <div class="carte"><span class="chiffre">{{ nb_vehicules }}</span>Véhicules actifs</div>
+  <div class="carte"><span class="chiffre">{{ nb_disponibles }}</span>Disponibles</div>
+  <div class="carte"><span class="chiffre">{{ alertes|length }}</span>Articles sous le seuil</div>
+  <div class="carte"><span class="chiffre">{{ nb_attente }}</span>Demandes en attente</div>
+  <div class="carte"><span class="chiffre">{{ carburant_mois }} Ar</span>Carburant ce mois-ci</div>
+</div>
+<div class="deux">
+  <section class="carte"><h2>⚠️ Stock bas</h2>
+    {% for a in alertes %}<p class="ligne"><strong>{{ a.nom }}</strong> : {{ a.stock }} {{ a.unite }} (seuil {{ a.seuil }})</p>
+    {% empty %}<p class="vide">Aucun article sous le seuil.</p>{% endfor %}
+  </section>
+  <section class="carte"><h2>Statut du parc</h2>
+    {% for s in par_statut %}<p class="ligne">{{ s.statut }} : <strong>{{ s.n }}</strong></p>
+    {% empty %}<p class="vide">Aucun véhicule.</p>{% endfor %}
+  </section>
+  <section class="carte"><h2>Dernières demandes d'achat</h2>
+    {% for d in dernieres_demandes %}<p class="ligne">{{ d.objet }} · {{ d.montant }} Ar · <em>{{ d.statut }}</em></p>
+    {% empty %}<p class="vide">Aucune demande.</p>{% endfor %}
+  </section>
+</div>
+{% endblock %}

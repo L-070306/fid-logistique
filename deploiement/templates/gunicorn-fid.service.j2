@@ -1,0 +1,13 @@
+[Unit]
+Description=Gunicorn - Logistique FID
+After=network.target mysql.service
+
+[Service]
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_dir }}
+ExecStart={{ app_dir }}/venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8000 --workers 3
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

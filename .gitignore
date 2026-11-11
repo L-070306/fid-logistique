@@ -1,0 +1,7 @@
+venv/
+.env
+staticfiles/
+__pycache__/
+*.pyc
+deploiement/inventaire.ini
+deploiement/group_vars/all/vault.yml

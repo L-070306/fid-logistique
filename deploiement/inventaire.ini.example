@@ -1,0 +1,3 @@
+# Copier en "inventaire.ini" et mettre l'adresse de votre serveur Ubuntu
+[serveur]
+192.168.1.50 ansible_user=ubuntu

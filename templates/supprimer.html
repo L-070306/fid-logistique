@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block titre %}Supprimer{% endblock %}
+{% block contenu %}
+<form method="post" class="carte formulaire">{% csrf_token %}
+  <h1>Supprimer cet élément ?</h1>
+  <p><strong>{{ object }}</strong></p>
+  <p class="vide">Cette action est définitive.</p>
+  <div class="boutons"><button class="danger-btn">Oui, supprimer</button> <a class="secondaire" href="{% url url_liste %}">Annuler</a></div>
+</form>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block titre %}{{ mode }} · {{ titre }}{% endblock %}
+{% block contenu %}
+<h1>{{ mode }} · {{ titre }}</h1>
+<form method="post" class="carte formulaire">{% csrf_token %}
+  {{ form.non_field_errors }}
+  {% for champ in form %}
+  <div class="champ">
+    <label for="{{ champ.id_for_label }}">{{ champ.label }}</label>
+    {{ champ }}
+    {% if champ.help_text %}<small>{{ champ.help_text }}</small>{% endif %}
+    {{ champ.errors }}
+  </div>
+  {% endfor %}
+  <div class="boutons"><button class="primaire">Enregistrer</button> <a class="secondaire" href="{% url url_liste %}">Annuler</a></div>
+</form>
+{% endblock %}

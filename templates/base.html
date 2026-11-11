@@ -1,0 +1,49 @@
+{% load static %}<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titre %}Logistique{% endblock %} · FID</title>
+  <link rel="icon" type="image/png" href="{% static 'img/favicon.png' %}">
+  <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+{% if user.is_authenticated %}
+<header class="entete-site">
+  <a class="marque" href="{% url 'tableau_bord' %}">
+    <img class="logo-img" src="{% static 'img/emblem-fid.png' %}" alt="Logo du FID">
+    <span class="marque-texte">
+      <strong>Fonds d'Intervention pour le Développement</strong>
+      <small>Plateforme logistique · Madagascar</small>
+    </span>
+  </a>
+  <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+    <button class="lien">Déconnexion ({{ user.username }})</button>
+  </form>
+</header>
+<nav class="barre">
+    <a href="{% url 'tableau_bord' %}">Tableau de bord</a>
+    {% if perms.logistique.view_vehicule %}<a href="{% url 'vehicules_liste' %}">Véhicules</a>{% endif %}
+    {% if perms.logistique.view_carburant %}<a href="{% url 'carburant_liste' %}">Carburant</a>{% endif %}
+    {% if perms.logistique.view_article %}<a href="{% url 'articles_liste' %}">Stocks</a>{% endif %}
+    {% if perms.logistique.view_mouvement %}<a href="{% url 'mouvements_liste' %}">Mouvements</a>{% endif %}
+    {% if perms.logistique.view_demande %}<a href="{% url 'demandes_liste' %}">Demandes d'achat</a>{% endif %}
+    {% if user.is_staff %}<a href="{% url 'admin:index' %}">Administration</a>{% endif %}
+</nav>
+{% endif %}
+<main>
+  {% block contenu %}{% endblock %}
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite">
+  {% for m in messages %}
+  <div class="toast {{ m.tags }}" role="{% if m.level >= 40 %}alert{% else %}status{% endif %}">
+    <span class="toast-icone" aria-hidden="true"></span>
+    <p class="toast-texte">{{ m }}</p>
+    <button type="button" class="toast-fermer" aria-label="Fermer">&times;</button>
+  </div>
+  {% endfor %}
+</div>
+<script src="{% static 'js/toast.js' %}" defer></script>
+</body>
+</html>
