@@ -5,7 +5,7 @@
 <div class="carte connexion">
   <img class="logo-login" src="{% static 'img/logo-fid.jpg' %}"
        alt="FID - Fonds d'Intervention pour le Développement, Madagascar">
-  <h1>Plateforme logistique</h1>
+  <h1>Plateforme logistique de FID</h1>
   <form method="post">{% csrf_token %}
     {% if form.errors %}<div class="msg error">Identifiant ou mot de passe incorrect.</div>{% endif %}
     <div class="champ"><label for="id_username">Identifiant</label>{{ form.username }}</div>
