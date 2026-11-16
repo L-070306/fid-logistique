@@ -1,0 +1,367 @@
+---
+# Déploiement FID Logistique sécurisé sur 2 serveurs.
+#   - groupe [db]  : MySQL + sauvegardes
+#   - groupe [web] : Nginx (HTTPS) + Gunicorn + Django
+#
+# Sécurité ajoutée par rapport à deploy-2-serveurs.yml :
+#   1. SSH durci (pas de connexion root) + Fail2ban sur les 2 serveurs
+#   2. HTTPS avec certificat auto-signé (labo) + redirection HTTP -> HTTPS
+#   3. Pare-feu UFW sur web1 (22, 80, 443) en plus de celui de web2
+#   4. En-têtes de sécurité Nginx, version de Nginx masquée
+#
+# Lancer : ansible-playbook deploy-2-serveurs-securise.yml --ask-vault-pass --ask-become-pass
+
+# ======================================================================
+# PLAY 1 : durcissement commun (SSH + Fail2ban) sur tous les serveurs
+# ======================================================================
+- name: Durcissement de base (SSH et Fail2ban)
+  hosts: all
+  become: true
+
+  vars:
+    # Passer à true UNIQUEMENT quand la connexion par clé SSH fonctionne partout.
+    # Les connexions SSH par mot de passe seront alors refusées.
+    ssh_desactiver_mot_de_passe: false
+    reseau_prive: 192.168.56.0/24
+
+  tasks:
+    - name: Installer Fail2ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 300
+
+    - name: Configurer Fail2ban (bannissement des attaques SSH par force brute)
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        mode: "0644"
+        content: |
+          [DEFAULT]
+          ignoreip = 127.0.0.1/8 {{ reseau_prive }}
+          bantime  = 1h
+          findtime = 10m
+          maxretry = 5
+
+          [sshd]
+          enabled = true
+      notify: Redémarrer fail2ban
+
+    - name: Fail2ban démarré et activé au démarrage
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+
+    # Le fichier commence par 00- : sshd applique la première valeur rencontrée,
+    # donc ce fichier passe avant ceux de cloud-init (50-...).
+    - name: Durcir la configuration SSH
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-durcissement.conf
+        mode: "0644"
+        content: |
+          PermitRootLogin no
+          MaxAuthTries 4
+          X11Forwarding no
+          PasswordAuthentication {{ 'no' if ssh_desactiver_mot_de_passe else 'yes' }}
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Recharger ssh
+
+  handlers:
+    - name: Redémarrer fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+
+    - name: Recharger ssh
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
+
+
+# ======================================================================
+# PLAY 2 : serveur de base de données
+# ======================================================================
+- name: Configurer le serveur de base de données MySQL
+  hosts: db
+  become: true
+
+  vars:
+    web_ip: "{{ hostvars[groups['web'][0]].ansible_host }}"
+
+  tasks:
+    - name: Installer MySQL et le connecteur Python pour Ansible
+      ansible.builtin.apt:
+        name: [mysql-server, python3-pymysql, ufw]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 300
+
+    - name: MySQL démarré et activé au démarrage
+      ansible.builtin.service:
+        name: mysql
+        state: started
+        enabled: true
+
+    - name: Faire écouter MySQL sur le réseau privé
+      ansible.builtin.lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: '^bind-address'
+        line: "bind-address = {{ ansible_host }}"
+      notify: Redémarrer mysql
+
+    - name: Appliquer le changement MySQL maintenant (avant la création des comptes)
+      ansible.builtin.meta: flush_handlers
+
+    - name: Créer la base de données
+      community.mysql.mysql_db:
+        name: "{{ db_nom }}"
+        encoding: utf8mb4
+        collation: utf8mb4_unicode_ci
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Créer l'utilisateur MySQL de l'application (accès depuis le serveur web)
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        host: "{{ web_ip }}"
+        password: "{{ vault_db_password }}"
+        priv: "{{ db_nom }}.*:ALL"
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+      no_log: true
+
+    - name: UFW - autoriser SSH
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: UFW - autoriser MySQL uniquement depuis le serveur web
+      community.general.ufw:
+        rule: allow
+        port: "3306"
+        proto: tcp
+        from_ip: "{{ web_ip }}"
+
+    - name: UFW - activer (refuser le reste par défaut)
+      community.general.ufw:
+        state: enabled
+        policy: deny
+
+    - name: Créer le dossier de sauvegarde
+      ansible.builtin.file:
+        path: /var/backups/fid
+        state: directory
+        mode: "0750"
+
+    - name: Sauvegarde quotidienne de la base à 2 h
+      ansible.builtin.cron:
+        name: "Sauvegarde MySQL FID"
+        minute: "0"
+        hour: "2"
+        job: "mysqldump --single-transaction {{ db_nom }} | gzip > /var/backups/fid/{{ db_nom }}_$(date +\\%F).sql.gz"
+
+    - name: Supprimer les sauvegardes de plus de 14 jours
+      ansible.builtin.cron:
+        name: "Nettoyage des sauvegardes FID"
+        minute: "30"
+        hour: "2"
+        job: "find /var/backups/fid -name '*.sql.gz' -mtime +14 -delete"
+
+  handlers:
+    - name: Redémarrer mysql
+      ansible.builtin.service:
+        name: mysql
+        state: restarted
+
+
+# ======================================================================
+# PLAY 3 : serveur web (Nginx HTTPS + Gunicorn + Django)
+# ======================================================================
+- name: Déployer l'application FID (Nginx HTTPS + Gunicorn + Django)
+  hosts: web
+  become: true
+
+  tasks:
+    # ---------- Système ----------
+    - name: Installer les paquets système
+      ansible.builtin.apt:
+        name: [python3-venv, python3-pip, git, nginx, acl, openssl, ufw]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 300
+
+    # ---------- Application ----------
+    - name: Créer l'utilisateur système de l'application
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "/var/lib/{{ app_user }}"
+        create_home: true
+
+    - name: S'assurer que le dossier personnel de l'utilisateur existe
+      ansible.builtin.file:
+        path: "/var/lib/{{ app_user }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0750"
+
+    - name: Créer le dossier de l'application
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Récupérer le code depuis Git
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ repo_version }}"
+      become_user: "{{ app_user }}"
+      notify: Redémarrer gunicorn
+
+    - name: Déposer le fichier de configuration (.env)
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+      notify: Redémarrer gunicorn
+
+    - name: Créer l'environnement virtuel et installer les dépendances
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+        virtualenv_command: python3 -m venv
+      become_user: "{{ app_user }}"
+      notify: Redémarrer gunicorn
+
+    - name: Appliquer les migrations de la base
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py migrate --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      register: migration
+      changed_when: "'Applying' in migration.stdout"
+
+    - name: Collecter les fichiers statiques (CSS, JS, images)
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py collectstatic --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: "{{ app_user }}"
+      register: statiques
+      changed_when: "not (statiques.stdout | trim).startswith('0 static files')"
+
+    - name: Créer le compte administrateur (une seule fois)
+      ansible.builtin.command: "{{ app_dir }}/venv/bin/python manage.py createsuperuser --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      environment:
+        DJANGO_SUPERUSER_USERNAME: "{{ vault_admin_user }}"
+        DJANGO_SUPERUSER_EMAIL: "{{ vault_admin_email }}"
+        DJANGO_SUPERUSER_PASSWORD: "{{ vault_admin_password }}"
+      become_user: "{{ app_user }}"
+      register: superuser
+      changed_when: superuser.rc == 0
+      failed_when: superuser.rc != 0 and 'already taken' not in superuser.stderr
+      no_log: true
+
+    # ---------- Services ----------
+    - name: Installer le service Gunicorn
+      ansible.builtin.template:
+        src: gunicorn-fid.service.j2
+        dest: /etc/systemd/system/gunicorn-fid.service
+        mode: "0644"
+      notify: Redémarrer gunicorn
+
+    - name: Démarrer Gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn-fid
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # ---------- HTTPS : certificat auto-signé (labo) ----------
+    # Avec un vrai nom de domaine public, remplacer ces 2 tâches par Let's Encrypt (Certbot).
+    - name: Générer un certificat auto-signé (labo)
+      ansible.builtin.command: >
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048
+        -keyout /etc/ssl/private/fid.key
+        -out /etc/ssl/certs/fid.crt
+        -subj "/CN={{ domaine }}"
+        -addext "subjectAltName={{ 'IP' if domaine is match('^[0-9.]+$') else 'DNS' }}:{{ domaine }}"
+      args:
+        creates: /etc/ssl/certs/fid.crt
+      notify: Recharger nginx
+
+    - name: Protéger la clé privée du certificat
+      ansible.builtin.file:
+        path: /etc/ssl/private/fid.key
+        owner: root
+        group: root
+        mode: "0600"
+
+    # ---------- Nginx ----------
+    - name: Configurer Nginx (HTTPS, redirection, en-têtes de sécurité)
+      ansible.builtin.template:
+        src: nginx-fid.conf.j2
+        dest: /etc/nginx/sites-available/fid
+        mode: "0644"
+      notify: Recharger nginx
+
+    - name: Activer le site Nginx
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/fid
+        dest: /etc/nginx/sites-enabled/fid
+        state: link
+      notify: Recharger nginx
+
+    - name: Désactiver le site Nginx par défaut
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Recharger nginx
+
+    - name: Vérifier la configuration Nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Nginx démarré et activé au démarrage
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+    # ---------- Pare-feu : SSH, HTTP, HTTPS uniquement ----------
+    # SSH est autorisé AVANT l'activation, pour ne pas se bloquer.
+    - name: UFW - autoriser SSH, HTTP et HTTPS
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["22", "80", "443"]
+
+    - name: UFW - activer (refuser le reste par défaut)
+      community.general.ufw:
+        state: enabled
+        policy: deny
+
+  handlers:
+    - name: Redémarrer gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn-fid
+        state: restarted
+
+    - name: Recharger nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
