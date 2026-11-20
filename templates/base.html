@@ -28,6 +28,7 @@
     {% if perms.logistique.view_article %}<a href="{% url 'articles_liste' %}">Stocks</a>{% endif %}
     {% if perms.logistique.view_mouvement %}<a href="{% url 'mouvements_liste' %}">Mouvements</a>{% endif %}
     {% if perms.logistique.view_demande %}<a href="{% url 'demandes_liste' %}">Demandes d'achat</a>{% endif %}
+    {% if perms.logistique.view_bureau %}<a href="{% url 'bureau_liste' %}">Bureau</a>{% endif %}
     {% if user.is_staff %}<a href="{% url 'admin:index' %}">Administration</a>{% endif %}
 </nav>
 {% endif %}
