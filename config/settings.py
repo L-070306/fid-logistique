@@ -20,17 +20,21 @@ if _env.exists():
             os.environ.setdefault(cle.strip(), valeur.strip())
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "cle-de-developpement-a-changer")
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"  # sûr par défaut : DEBUG désactivé si non précisé
 ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h]
 
 if not DEBUG:
-    if SECRET_KEY.startswith("cle-de-developpement"):
-        raise RuntimeError("DJANGO_SECRET_KEY doit être défini en production.")
+    if SECRET_KEY.startswith(("cle-de-developpement", "changez-moi")) or len(SECRET_KEY) < 32:
+        raise RuntimeError("DJANGO_SECRET_KEY doit être défini en production (32 caractères minimum).")
     CSRF_TRUSTED_ORIGINS = [o for o in os.environ.get("DJANGO_CSRF_ORIGINS", "").split(",") if o]
     if os.environ.get("DJANGO_HTTPS") == "1":  # à activer une fois HTTPS en place
         SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
         SESSION_COOKIE_SECURE = True
         CSRF_COOKIE_SECURE = True
+        SECURE_SSL_REDIRECT = True
+        SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_HSTS_SECONDS", "0"))
+        SECURE_REFERRER_POLICY = "same-origin"
+        SESSION_COOKIE_AGE = 8 * 3600  # déconnexion automatique après 8 h
 
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
@@ -61,8 +65,8 @@ TEMPLATES = [{
 
 DATABASES = {"default": {
     "ENGINE": "django.db.backends.mysql",
-    "NAME": os.environ.get("DB_NAME", "projet"),
-    "USER": os.environ.get("DB_USER", "zaho"),
+    "NAME": os.environ.get("DB_NAME", "LOGISTIQUE"),
+    "USER": os.environ.get("DB_USER", "nirina"),
     "PASSWORD": os.environ.get("DB_PASSWORD", "devops1*"),
     "HOST": os.environ.get("DB_HOST", "127.0.0.1"),
     "PORT": os.environ.get("DB_PORT", "3306"),
