@@ -5,7 +5,7 @@
 #
 # Sécurité ajoutée par rapport à deploy-2-serveurs.yml :
 #   1. SSH durci (pas de connexion root) + Fail2ban sur les 2 serveurs
-#   2. HTTPS avec certificat auto-signé (labo) + redirection HTTP -> HTTPS
+#   2. HTTPS avec certificat signé par la CA interne FID + redirection HTTP -> HTTPS
 #   3. Pare-feu UFW sur web1 (22, 80, 443) en plus de celui de web2
 #   4. En-têtes de sécurité Nginx, version de Nginx masquée
 #
@@ -185,11 +185,14 @@
   hosts: web
   become: true
 
+  vars:
+    ssl_dir: /etc/ssl/fid
+
   tasks:
     # ---------- Système ----------
     - name: Installer les paquets système
       ansible.builtin.apt:
-        name: [python3-venv, python3-pip, git, nginx, acl, openssl, ufw]
+        name: [python3-venv, python3-pip, python3-cryptography, git, nginx, acl, openssl, ufw]
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -290,25 +293,90 @@
         state: started
         daemon_reload: true
 
-    # ---------- HTTPS : certificat auto-signé (labo) ----------
-    # Avec un vrai nom de domaine public, remplacer ces 2 tâches par Let's Encrypt (Certbot).
-    - name: Générer un certificat auto-signé (labo)
-      ansible.builtin.command: >
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048
-        -keyout /etc/ssl/private/fid.key
-        -out /etc/ssl/certs/fid.crt
-        -subj "/CN={{ domaine }}"
-        -addext "subjectAltName={{ 'IP' if domaine is match('^[0-9.]+$') else 'DNS' }}:{{ domaine }}"
-      args:
-        creates: /etc/ssl/certs/fid.crt
+    # ---------- HTTPS : autorité interne FID + certificat signé (cadenas vert) ----------
+    # Si /etc/ssl/fid/server.crt existe déjà, on ne recrée NI la CA NI le certificat :
+    # la CA déjà installée sur les postes Windows reste valable.
+    # Avec un vrai nom de domaine public, remplacer ce bloc par Let's Encrypt (Certbot).
+    - name: Dossier des certificats
+      ansible.builtin.file:
+        path: "{{ ssl_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Certificat serveur déjà présent ?
+      ansible.builtin.stat:
+        path: "{{ ssl_dir }}/server.crt"
+      register: cert_existant
+
+    - name: Clé privée de l'autorité de certification (CA)
+      community.crypto.openssl_privatekey:
+        path: "{{ ssl_dir }}/fid-ca.key"
+        size: 4096
+        mode: "0600"
+      when: not cert_existant.stat.exists
+
+    - name: Demande de certificat de la CA
+      community.crypto.openssl_csr:
+        path: "{{ ssl_dir }}/fid-ca.csr"
+        privatekey_path: "{{ ssl_dir }}/fid-ca.key"
+        common_name: "FID Logistique - Autorité interne"
+        basic_constraints: ["CA:TRUE"]
+        basic_constraints_critical: true
+        key_usage: [keyCertSign, cRLSign]
+        key_usage_critical: true
+      when: not cert_existant.stat.exists
+
+    - name: Certificat de la CA (valable 10 ans)
+      community.crypto.x509_certificate:
+        path: "{{ ssl_dir }}/fid-ca.crt"
+        csr_path: "{{ ssl_dir }}/fid-ca.csr"
+        privatekey_path: "{{ ssl_dir }}/fid-ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"
+      when: not cert_existant.stat.exists
+
+    - name: Clé privée du serveur
+      community.crypto.openssl_privatekey:
+        path: "{{ ssl_dir }}/server.key"
+        size: 2048
+        mode: "0600"
+      when: not cert_existant.stat.exists
+
+    - name: Demande de certificat du serveur (adresse ou nom dans le SAN)
+      community.crypto.openssl_csr:
+        path: "{{ ssl_dir }}/server.csr"
+        privatekey_path: "{{ ssl_dir }}/server.key"
+        common_name: "{{ domaine }}"
+        subject_alt_name: "{{ ['IP:' ~ domaine] if domaine is match('^[0-9.]+$') else ['DNS:' ~ domaine] }}"
+        key_usage: [digitalSignature, keyEncipherment]
+        extended_key_usage: [serverAuth]
+      when: not cert_existant.stat.exists
+
+    - name: Certificat du serveur signé par la CA (valable 2 ans)
+      community.crypto.x509_certificate:
+        path: "{{ ssl_dir }}/server.crt"
+        csr_path: "{{ ssl_dir }}/server.csr"
+        provider: ownca
+        ownca_path: "{{ ssl_dir }}/fid-ca.crt"
+        ownca_privatekey_path: "{{ ssl_dir }}/fid-ca.key"
+        ownca_not_after: "+730d"
+      when: not cert_existant.stat.exists
       notify: Recharger nginx
 
-    - name: Protéger la clé privée du certificat
+    - name: Protéger la clé privée du serveur
       ansible.builtin.file:
-        path: /etc/ssl/private/fid.key
+        path: "{{ ssl_dir }}/server.key"
         owner: root
         group: root
         mode: "0600"
+
+    - name: Récupérer la CA sur le poste Ansible (à installer dans Windows)
+      ansible.builtin.fetch:
+        src: "{{ ssl_dir }}/fid-ca.crt"
+        dest: "{{ playbook_dir }}/fid-ca.crt"
+        flat: true
 
     # ---------- Nginx ----------
     - name: Configurer Nginx (HTTPS, redirection, en-têtes de sécurité)
