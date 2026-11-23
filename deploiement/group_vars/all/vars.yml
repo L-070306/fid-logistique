@@ -7,3 +7,5 @@ db_nom: fid_logistique
 db_user: fid_app
 db_host: 127.0.0.1
 db_port: 3306
+hsts_secondes: 3600            # 1 h pour tester ; passer à 31536000 (1 an) quand tout fonctionne
+ssl_dir: /etc/ssl/fid
